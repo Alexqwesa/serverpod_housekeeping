@@ -1,0 +1,259 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:serverpod/server.dart';
+import 'package:serverpod/serverpod.dart';
+
+import '../schedule/schedule_helpers.dart';
+
+/// Backup job config passed by the host project (no env magic).
+class BackupJobConfig {
+  const BackupJobConfig({
+    required this.agentUrl, // e.g. http://postgres:1804/backup
+    this.agentToken = '',
+    this.httpTimeout = const Duration(seconds: 300),
+    this.sendDbHostPortHeaders = false,
+    this.dbHostOverride,
+    this.dbPortOverride,
+    this.dailyTimeUtc = const UtcTime(20, 30),
+    this.weeklyTimeUtc = const UtcTime(20, 0),
+    this.weeklyWeekday = DateTime.sunday,
+    this.monthlyTimeUtc = const UtcTime(20, 15),
+    this.monthlyDay = 1,
+  });
+
+  final String agentUrl;
+  final String agentToken;
+  final Duration httpTimeout;
+
+  /// If true, send POSTGRES_HOST/POSTGRES_PORT headers to the agent.
+  final bool sendDbHostPortHeaders;
+
+  /// Optional overrides; if null, values are derived from Serverpod db config.
+  final String? dbHostOverride;
+  final String? dbPortOverride;
+
+  final UtcTime dailyTimeUtc;
+  final UtcTime weeklyTimeUtc;
+  final int weeklyWeekday; // DateTime.monday..DateTime.sunday
+  final UtcTime monthlyTimeUtc;
+  final int monthlyDay;
+}
+
+/// Base class implementing the actual HTTP call logic.
+/// Uses `FutureCall<void>` for maximum Serverpod 2+/3+ compatibility.
+abstract class _BackupBaseFutureCall extends FutureCall {
+  _BackupBaseFutureCall(this.config);
+
+  final BackupJobConfig config;
+
+  /// 'daily' | 'weekly' | 'monthly' | 'adhoc'
+  String get policy;
+
+  @override
+  Future<void> invoke(Session session, void parameter) async {
+    session.log('BackupFutureCall started; policy=$policy');
+
+    final uri = Uri.parse(config.agentUrl).replace(queryParameters: {'reason': policy});
+    final client = HttpClient()..connectionTimeout = config.httpTimeout;
+
+    try {
+      final req = await client.postUrl(uri);
+
+      if (config.agentToken.isNotEmpty) {
+        req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${config.agentToken}');
+      }
+
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+
+      if (config.sendDbHostPortHeaders) {
+        final cfg = session.serverpod.config.database;
+
+        final dbHost = config.dbHostOverride ??
+            (session.serverpod.runMode == ServerpodRunMode.development
+                ? 'host.docker.internal'
+                : (cfg?.host ?? 'postgres'));
+
+        final dbPort = config.dbPortOverride ?? (cfg?.port?.toString() ?? '5432');
+
+        req.headers.set('POSTGRES_HOST', dbHost);
+        req.headers.set('POSTGRES_PORT', dbPort);
+      }
+
+      req.add(utf8.encode('{}'));
+
+      final res = await req.close().timeout(config.httpTimeout);
+      final status = res.statusCode;
+      final bodyText = await res.transform(utf8.decoder).join();
+
+      final success = status >= 200 && status < 300;
+      if (!success) {
+        session.log(
+          'Backup agent failed; status=$status body=$bodyText',
+          level: LogLevel.error,
+        );
+        return;
+      }
+
+      session.log('Backup agent success; status=$status body=$bodyText');
+
+      // Self-reschedule (recurring only)
+      final nextTime = switch (policy) {
+        'daily' => nextDaily(hour: config.dailyTimeUtc.hour, minute: config.dailyTimeUtc.minute),
+        'weekly' => nextWeekly(
+            weekday: config.weeklyWeekday,
+            hour: config.weeklyTimeUtc.hour,
+            minute: config.weeklyTimeUtc.minute,
+          ),
+        'monthly' => nextMonthly(
+            hour: config.monthlyTimeUtc.hour,
+            minute: config.monthlyTimeUtc.minute,
+            day: config.monthlyDay,
+          ),
+        _ => null,
+      };
+
+      final id = switch (policy) {
+        'daily' => BackupDailyFutureCall.futureCallId,
+        'weekly' => BackupWeeklyFutureCall.futureCallId,
+        'monthly' => BackupMonthlyFutureCall.futureCallId,
+        _ => null,
+      };
+
+      final name = switch (policy) {
+        'daily' => BackupDailyFutureCall.futureCallName,
+        'weekly' => BackupWeeklyFutureCall.futureCallName,
+        'monthly' => BackupMonthlyFutureCall.futureCallName,
+        _ => null,
+      };
+
+      if (nextTime != null && id != null && name != null) {
+        await session.serverpod.futureCallAtTime(
+          name,
+          null,
+          nextTime,
+          identifier: id,
+        );
+        session.log('Rescheduled $policy backup at $nextTime (id=$id)');
+      }
+    } on TimeoutException {
+      session.log(
+        'Backup agent timeout after ${config.httpTimeout.inSeconds}s',
+        level: LogLevel.error,
+      );
+    } catch (e, st) {
+      session.log(
+        'Backup agent exception: $e\n$st',
+        level: LogLevel.error,
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+}
+
+/// Daily backup: `backup.daily`
+class BackupDailyFutureCall extends _BackupBaseFutureCall {
+  BackupDailyFutureCall(super.config);
+
+  static const futureCallName = 'housekeeping.backup.daily';
+  static const futureCallId = 'housekeeping:backup:daily';
+
+  @override
+  String get policy => 'daily';
+
+  static Future<void> ensureScheduled(Serverpod pod, {required BackupJobConfig config}) async {
+    final session = await pod.createSession();
+    try {
+      pod.registerFutureCall(BackupDailyFutureCall(config), futureCallName);
+
+      await session.serverpod.cancelFutureCall(futureCallId);
+
+      await session.serverpod.futureCallAtTime(
+        futureCallName,
+        null,
+        nextDaily(hour: config.dailyTimeUtc.hour, minute: config.dailyTimeUtc.minute),
+        identifier: futureCallId,
+      );
+
+      session.log('Daily backup scheduled (UTC) at ${config.dailyTimeUtc}');
+    } finally {
+      await session.close();
+    }
+  }
+}
+
+/// Weekly backup: `backup.weekly`
+class BackupWeeklyFutureCall extends _BackupBaseFutureCall {
+  BackupWeeklyFutureCall(super.config);
+
+  static const futureCallName = 'housekeeping.backup.weekly';
+  static const futureCallId = 'housekeeping:backup:weekly';
+
+  @override
+  String get policy => 'weekly';
+
+  static Future<void> ensureScheduled(Serverpod pod, {required BackupJobConfig config}) async {
+    final session = await pod.createSession();
+    try {
+      pod.registerFutureCall(BackupWeeklyFutureCall(config), futureCallName);
+
+      await session.serverpod.cancelFutureCall(futureCallId);
+
+      await session.serverpod.futureCallAtTime(
+        futureCallName,
+        null,
+        nextWeekly(
+          weekday: config.weeklyWeekday,
+          hour: config.weeklyTimeUtc.hour,
+          minute: config.weeklyTimeUtc.minute,
+        ),
+        identifier: futureCallId,
+      );
+
+      session.log(
+        'Weekly backup scheduled (UTC) weekday=${config.weeklyWeekday} at ${config.weeklyTimeUtc}',
+      );
+    } finally {
+      await session.close();
+    }
+  }
+}
+
+/// Monthly backup: `backup.monthly`
+class BackupMonthlyFutureCall extends _BackupBaseFutureCall {
+  BackupMonthlyFutureCall(super.config);
+
+  static const futureCallName = 'housekeeping.backup.monthly';
+  static const futureCallId = 'housekeeping:backup:monthly';
+
+  @override
+  String get policy => 'monthly';
+
+  static Future<void> ensureScheduled(Serverpod pod, {required BackupJobConfig config}) async {
+    final session = await pod.createSession();
+    try {
+      pod.registerFutureCall(BackupMonthlyFutureCall(config), futureCallName);
+
+      await session.serverpod.cancelFutureCall(futureCallId);
+
+      await session.serverpod.futureCallAtTime(
+        futureCallName,
+        null,
+        nextMonthly(
+          hour: config.monthlyTimeUtc.hour,
+          minute: config.monthlyTimeUtc.minute,
+          day: config.monthlyDay,
+        ),
+        identifier: futureCallId,
+      );
+
+      session.log(
+        'Monthly backup scheduled (UTC) day=${config.monthlyDay} at ${config.monthlyTimeUtc}',
+      );
+    } finally {
+      await session.close();
+    }
+  }
+}

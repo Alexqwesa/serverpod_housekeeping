@@ -1,0 +1,14 @@
+name: serverpod_housekeeping
+version: 1.0.0
+description: Serverpod FutureCall helpers - backup-agent trigger + internal tables cleanup.
+repository: https://github.com/alexqwesa/serverpod_housekeeping
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  serverpod:
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6
