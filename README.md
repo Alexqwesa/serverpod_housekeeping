@@ -48,9 +48,9 @@ Future<void> main(List<String> args) async {
   await ServerpodHousekeeping.ensureScheduled(
     pod,
     backup: const BackupJobConfig(
-      agentUrl: 'http://postgres:1804/backup',
+      agentUrl: envStr('BACKUP_AGENT_URL', 'http://postgres:1804/backup'),
       // you postgres docker container's default name
-      agentToken: 'secret',
+      agentToken: envStr('BACKUP_AGENT_TOKEN', ''),
       httpTimeout: Duration(seconds: 1000),
       sendDbHostPortHeaders: false,
       dailyTimeUtc: UtcTime(20, 30),

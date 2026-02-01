@@ -54,13 +54,14 @@ abstract class _BackupBaseFutureCall extends FutureCall {
   Future<void> invoke(Session session, void parameter) async {
     session.log('BackupFutureCall started; policy=$policy');
 
-    final uri = Uri.parse(config.agentUrl).replace(
-      queryParameters: {'reason': policy},
-    );
-
-    final client = HttpClient()..connectionTimeout = config.httpTimeout;
+    HttpClient? client;
 
     try {
+      final rawUrl = _sanitizeUrl(config.agentUrl);
+      final uri = Uri.parse(rawUrl).replace(queryParameters: {'reason': policy});
+
+      client = HttpClient()..connectionTimeout = config.httpTimeout;
+
       final req = await client.postUrl(uri);
 
       if (config.agentToken.isNotEmpty) {
@@ -102,11 +103,21 @@ abstract class _BackupBaseFutureCall extends FutureCall {
       }
 
       session.log('Backup agent success; status=$status body=$bodyText');
+    } on TimeoutException {
+      session.log(
+        'Backup agent timeout after ${config.httpTimeout.inSeconds}s',
+        level: LogLevel.error,
+      );
+    } catch (e, st) {
+      session.log(
+        'Backup agent exception: $e\n$st',
+        level: LogLevel.error,
+      );
+    } finally {
+      client?.close(force: true);
+      // Always reschedule recurring jobs even after failure
 
-      // One-shot: do not reschedule.
-      if (policy == 'adhoc') return;
-
-      // Self-reschedule (recurring only)
+      // Precompute recurring reschedule info (so it works even if we fail early).
       final nextTime = switch (policy) {
         'daily' => nextDaily(
             hour: config.dailyTimeUtc.hour,
@@ -139,29 +150,36 @@ abstract class _BackupBaseFutureCall extends FutureCall {
         _ => null,
       };
 
-      if (nextTime != null && id != null && name != null) {
-        await session.serverpod.futureCallAtTime(
-          name,
-          null,
-          nextTime,
-          identifier: id,
-        );
-        session.log('Rescheduled $policy backup at $nextTime (id=$id)');
+      if (!(policy == 'adhoc') && nextTime != null && id != null && name != null) {
+        try {
+          await session.serverpod.futureCallAtTime(
+            name,
+            null,
+            nextTime,
+            identifier: id,
+          );
+          session.log('Rescheduled $policy backup at $nextTime (id=$id)');
+        } catch (e, st) {
+          session.log(
+            'Failed to reschedule $policy backup: $e\n$st',
+            level: LogLevel.error,
+          );
+        }
       }
-    } on TimeoutException {
-      session.log(
-        'Backup agent timeout after ${config.httpTimeout.inSeconds}s',
-        level: LogLevel.error,
-      );
-    } catch (e, st) {
-      session.log(
-        'Backup agent exception: $e\n$st',
-        level: LogLevel.error,
-      );
-    } finally {
-      client.close(force: true);
     }
   }
+}
+
+/// Trim accidental wrapping quotes in config values.
+String _sanitizeUrl(String s) {
+  var v = s.trim();
+  if (v.length >= 2) {
+    final first = v.codeUnitAt(0);
+    final last = v.codeUnitAt(v.length - 1);
+    final quoted = (first == 0x27 && last == 0x27) || (first == 0x22 && last == 0x22); // ' or "
+    if (quoted) v = v.substring(1, v.length - 1).trim();
+  }
+  return v;
 }
 
 /// Daily backup: `backup.daily`
