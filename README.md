@@ -3,10 +3,9 @@
 A small helper package for Serverpod backends that registers and schedules
 operational “housekeeping” FutureCalls:
 
-- **BackupFutureCall**: calls your HTTP backup agent (pg_dump trigger)
-  and reschedules itself for daily/weekly/monthly policies.
-- **CleanupLogsFutureCall**: trims Serverpod internal tables and runs
-  VACUUM / ANALYZE daily.
+- **BackupFutureCall**: calls your HTTP backup agent (a `pg_dump` trigger) and reschedules
+  itself using daily/weekly/monthly policies.
+- **CleanupLogsFutureCall**: trims Serverpod internal tables and runs VACUUM / ANALYZE daily.
 
 Schedules are computed in **UTC** for predictability.
 
@@ -14,9 +13,13 @@ Schedules are computed in **UTC** for predictability.
 
 ## Why “housekeeping”
 
-Backups are a must. Log cleanup is useful for staging, or for production if you want detailed
+Backups are a must-have. Log cleanup is useful for staging, or for production if you want detailed
 Serverpod logs but don’t want to store gigabytes of data in Postgres.
 
+If you want your backups to include logs, schedule cleanup **after** the backup job.
+
+I also clean up health/metrics logs aggressively: if I ever need historical data for a specific
+date, I’ll restore it from a backup.
 
 ---
 
@@ -42,25 +45,54 @@ Future<void> main(List<String> args) async {
     Endpoints(),
   );
 
-    await ServerpodHousekeeping.ensureScheduled(
-      pod,
-      backup: const BackupJobConfig(
-        agentUrl: 'http://postgres:1804/backup', // you postgres docker container's default name
-        agentToken: 'secret',
-        httpTimeout: Duration(seconds: 1000),
-        sendDbHostPortHeaders: false, 
-        dailyTimeUtc: UtcTime(20, 30),
-        monthlyTimeUtc: UtcTime(20, 15),
-        weeklyTimeUtc: UtcTime(20, 0),
-        weeklyWeekday: DateTime.sunday,
-        monthlyDay: 1,
-      ),
-      cleanup: const CleanupLogsConfig( // don't need if you do not logs in production
-        timeUtc: UtcTime(19, 0), // before backup
-        keepRows: 10000,  // delete all except last 10000
-        fullVacuumQueryLog: true,
-      ),
-    );
+  await ServerpodHousekeeping.ensureScheduled(
+    pod,
+    backup: const BackupJobConfig(
+      agentUrl: 'http://postgres:1804/backup',
+      // you postgres docker container's default name
+      agentToken: 'secret',
+      httpTimeout: Duration(seconds: 1000),
+      sendDbHostPortHeaders: false,
+      dailyTimeUtc: UtcTime(20, 30),
+      monthlyTimeUtc: UtcTime(20, 15),
+      weeklyTimeUtc: UtcTime(20, 0),
+      weeklyWeekday: DateTime.sunday,
+      monthlyDay: 1,
+    ),
+    cleanup: const CleanupLogsConfig(
+      timeUtc: UtcTime(19, 0),
+      // UTC
+      defaultKeepRows: 10_000,
+      defaultBatchSize: 50_000,
+      defaultVacuum: VacuumMode.analyze,
+      order: [
+        CleanupTable.serverpod_message_log,
+        CleanupTable.serverpod_log,
+        CleanupTable.serverpod_query_log,
+        CleanupTable.serverpod_session_log,
+        CleanupTable.serverpod_health_metric,
+        CleanupTable.serverpod_health_connection_info,
+      ],
+      tables: {
+        CleanupTable.serverpod_query_log: TableCleanupConfig(
+          keepRows: 50_000,
+          vacuum: VacuumMode.fullAnalyze, // locks table; use sparingly
+        ),
+
+        CleanupTable.serverpod_session_log: TableCleanupConfig(
+          keepRows: 15_000,
+          vacuum: VacuumMode.fullAnalyze,
+        ),
+
+        CleanupTable.serverpod_health_metric: TableCleanupConfig(
+          keepRows: 20_000,
+        ),
+        CleanupTable.serverpod_health_connection_info: TableCleanupConfig(
+          keepRows: 20_000,
+        ),
+      },
+    ),
+  );
 
   await pod.start();
 }
