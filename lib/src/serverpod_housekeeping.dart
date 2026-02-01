@@ -1,9 +1,6 @@
 // lib/src/serverpod_housekeeping.dart
 import 'package:serverpod/server.dart';
 
-import 'future_calls/backup_future_call.dart';
-import 'future_calls/cleanup_logs_future_call.dart';
-
 /// Register + schedule housekeeping jobs for a Serverpod backend.
 ///
 /// Call once during startup.
@@ -25,6 +22,7 @@ class ServerpodHousekeeping {
       await BackupDailyFutureCall.ensureScheduled(pod, config: backup);
       await BackupWeeklyFutureCall.ensureScheduled(pod, config: backup);
       await BackupMonthlyFutureCall.ensureScheduled(pod, config: backup);
+      BackupAdhocFutureCall.register(pod, config: backup);
     }
     if (cleanup != null) {
       await CleanupLogsFutureCall.ensureScheduled(pod, config: cleanup);

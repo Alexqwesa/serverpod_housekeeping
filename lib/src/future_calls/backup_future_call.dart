@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:serverpod/server.dart';
 import 'package:serverpod/serverpod.dart';
 
 import '../schedule/schedule_helpers.dart';
@@ -55,14 +54,20 @@ abstract class _BackupBaseFutureCall extends FutureCall {
   Future<void> invoke(Session session, void parameter) async {
     session.log('BackupFutureCall started; policy=$policy');
 
-    final uri = Uri.parse(config.agentUrl).replace(queryParameters: {'reason': policy});
+    final uri = Uri.parse(config.agentUrl).replace(
+      queryParameters: {'reason': policy},
+    );
+
     final client = HttpClient()..connectionTimeout = config.httpTimeout;
 
     try {
       final req = await client.postUrl(uri);
 
       if (config.agentToken.isNotEmpty) {
-        req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${config.agentToken}');
+        req.headers.set(
+          HttpHeaders.authorizationHeader,
+          'Bearer ${config.agentToken}',
+        );
       }
 
       req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
@@ -98,9 +103,15 @@ abstract class _BackupBaseFutureCall extends FutureCall {
 
       session.log('Backup agent success; status=$status body=$bodyText');
 
+      // One-shot: do not reschedule.
+      if (policy == 'adhoc') return;
+
       // Self-reschedule (recurring only)
       final nextTime = switch (policy) {
-        'daily' => nextDaily(hour: config.dailyTimeUtc.hour, minute: config.dailyTimeUtc.minute),
+        'daily' => nextDaily(
+            hour: config.dailyTimeUtc.hour,
+            minute: config.dailyTimeUtc.minute,
+          ),
         'weekly' => nextWeekly(
             weekday: config.weeklyWeekday,
             hour: config.weeklyTimeUtc.hour,
@@ -163,7 +174,10 @@ class BackupDailyFutureCall extends _BackupBaseFutureCall {
   @override
   String get policy => 'daily';
 
-  static Future<void> ensureScheduled(Serverpod pod, {required BackupJobConfig config}) async {
+  static Future<void> ensureScheduled(
+    Serverpod pod, {
+    required BackupJobConfig config,
+  }) async {
     final session = await pod.createSession();
     try {
       pod.registerFutureCall(BackupDailyFutureCall(config), futureCallName);
@@ -173,7 +187,10 @@ class BackupDailyFutureCall extends _BackupBaseFutureCall {
       await session.serverpod.futureCallAtTime(
         futureCallName,
         null,
-        nextDaily(hour: config.dailyTimeUtc.hour, minute: config.dailyTimeUtc.minute),
+        nextDaily(
+          hour: config.dailyTimeUtc.hour,
+          minute: config.dailyTimeUtc.minute,
+        ),
         identifier: futureCallId,
       );
 
@@ -194,7 +211,10 @@ class BackupWeeklyFutureCall extends _BackupBaseFutureCall {
   @override
   String get policy => 'weekly';
 
-  static Future<void> ensureScheduled(Serverpod pod, {required BackupJobConfig config}) async {
+  static Future<void> ensureScheduled(
+    Serverpod pod, {
+    required BackupJobConfig config,
+  }) async {
     final session = await pod.createSession();
     try {
       pod.registerFutureCall(BackupWeeklyFutureCall(config), futureCallName);
@@ -231,7 +251,10 @@ class BackupMonthlyFutureCall extends _BackupBaseFutureCall {
   @override
   String get policy => 'monthly';
 
-  static Future<void> ensureScheduled(Serverpod pod, {required BackupJobConfig config}) async {
+  static Future<void> ensureScheduled(
+    Serverpod pod, {
+    required BackupJobConfig config,
+  }) async {
     final session = await pod.createSession();
     try {
       pod.registerFutureCall(BackupMonthlyFutureCall(config), futureCallName);
@@ -252,6 +275,57 @@ class BackupMonthlyFutureCall extends _BackupBaseFutureCall {
       session.log(
         'Monthly backup scheduled (UTC) day=${config.monthlyDay} at ${config.monthlyTimeUtc}',
       );
+    } finally {
+      await session.close();
+    }
+  }
+}
+
+/// Adhoc backup: one-shot, no reschedule.
+class BackupAdhocFutureCall extends _BackupBaseFutureCall {
+  BackupAdhocFutureCall(super.config);
+
+  static const futureCallName = 'housekeeping.backup.adhoc';
+  static const futureCallId = 'housekeeping:backup:adhoc';
+
+  @override
+  String get policy => 'adhoc';
+
+  static BackupJobConfig? _config;
+
+  /// Register the adhoc FutureCall (no scheduling).
+  ///
+  /// Stores config so `runNow()` can be called without parameters.
+  static void register(Serverpod pod, {required BackupJobConfig config}) {
+    _config = config;
+    pod.registerFutureCall(BackupAdhocFutureCall(config), futureCallName);
+  }
+
+  /// Trigger a one-shot backup immediately (runs via FutureCall scheduler).
+  ///
+  /// - No config parameter (uses config stored during `register()`)
+  /// - No reschedule (policy == 'adhoc')
+  static Future<void> runNow(Serverpod pod) async {
+    if (_config == null) {
+      throw StateError(
+        'BackupAdhocFutureCall.runNow called before register(). '
+        'Register it once during startup.',
+      );
+    }
+
+    final session = await pod.createSession();
+    try {
+      // Replace any pending adhoc run.
+      await session.serverpod.cancelFutureCall(futureCallId);
+
+      await session.serverpod.futureCallAtTime(
+        futureCallName,
+        null,
+        DateTime.now().toUtc(),
+        identifier: futureCallId,
+      );
+
+      session.log('Adhoc backup triggered (UTC) now');
     } finally {
       await session.close();
     }
