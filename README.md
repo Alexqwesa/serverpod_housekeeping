@@ -3,8 +3,8 @@
 A small helper package for Serverpod backends that registers and schedules
 operational “housekeeping” FutureCalls:
 
-- **BackupFutureCall**: calls your HTTP backup agent (a `pg_dump` trigger) and reschedules
-  itself using daily/weekly/monthly policies.
+- **BackupFutureCall**: calls your HTTP backup agent (I use https://github.com/Alexqwesa/postgres-image-with-backup-agent ) 
+and reschedules itself using daily/weekly/monthly policies.
 - **CleanupLogsFutureCall**: trims Serverpod internal tables and runs VACUUM / ANALYZE daily.
 
 Schedules are computed in **UTC** for predictability.
