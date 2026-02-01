@@ -30,8 +30,14 @@ In your Serverpod server `pubspec.yaml`:
 ```yaml
 dependencies:
   serverpod_housekeeping:
-```
+    git:
+      url: https://github.com/Alexqwesa/serverpod_housekeeping.git
+      ref: master
 
+# soon it will be:
+dependencies:
+  serverpod_housekeeping:
+```
 
 ```dart
 
@@ -98,4 +104,9 @@ Future<void> main(List<String> args) async {
 }
 
 ```
+
+## TODO:
+
+- move here check_health too
+- any backend
 
