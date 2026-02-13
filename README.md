@@ -64,6 +64,7 @@ Future<void> main(List<String> args) async {
       weeklyTimeUtc: UtcTime(20, 0),
       weeklyWeekday: DateTime.sunday,
       monthlyDay: 1,
+      callBack: (success, policy){} // optional hook
     ),
     cleanup: const CleanupLogsConfig(
       timeUtc: UtcTime(19, 0),

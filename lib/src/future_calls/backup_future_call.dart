@@ -20,6 +20,7 @@ class BackupJobConfig {
     this.weeklyWeekday = DateTime.sunday,
     this.monthlyTimeUtc = const UtcTime(20, 15),
     this.monthlyDay = 1,
+    this.callBack,
   });
 
   final String agentUrl;
@@ -38,6 +39,8 @@ class BackupJobConfig {
   final int weeklyWeekday; // DateTime.monday..DateTime.sunday
   final UtcTime monthlyTimeUtc;
   final int monthlyDay;
+
+  final void Function(bool success, String policy)? callBack;
 }
 
 /// Base class implementing the actual HTTP call logic.
@@ -53,7 +56,7 @@ abstract class _BackupBaseFutureCall extends FutureCall {
   @override
   Future<void> invoke(Session session, void parameter) async {
     session.log('BackupFutureCall started; policy=$policy');
-
+    var success = false;
     HttpClient? client;
 
     try {
@@ -93,7 +96,7 @@ abstract class _BackupBaseFutureCall extends FutureCall {
       final status = res.statusCode;
       final bodyText = await res.transform(utf8.decoder).join();
 
-      final success = status >= 200 && status < 300;
+      success = status >= 200 && status < 300;
       if (!success) {
         session.log(
           'Backup agent failed; status=$status body=$bodyText',
@@ -166,6 +169,8 @@ abstract class _BackupBaseFutureCall extends FutureCall {
           );
         }
       }
+
+      config.callBack?.call(success, policy);
     }
   }
 }
